@@ -1,8 +1,9 @@
 import torch
 import time
 import numpy as np
-from sklearn.metrics.scorer import make_scorer
 import os, shutil
+from utils import AverageMeter
+
 
 class NN(object):
     """
@@ -27,14 +28,16 @@ class NN(object):
             Pytorch Model.
         param_diagonstic (bool):
             check parameters, will be print. TODO record parameters.
-
-
+        shape_diagonstic (bool):
+            print shape for some important variables
+        result_diagonstic (bool):
+            print result for some variables.
     """
 
     def __init__(self, train_loader=None, val_loader=None, epochs=None,
                  opt=None, criterion=None, initial_lr=None, checkpoint_save=None,
-                 model_save=None, dataset=None, param_diagonstic=None, shape_diagonstic=None,
-                 result_diagonstic=None, lr_adjust=None,
+                 model_save=None, param_diagonstic=None, shape_diagonstic=None,
+                 result_diagonstic=None, lr_adjust=None, metrics=None,
                  model=None):
         self.train_loader = train_loader
         self.val_loader = val_loader
@@ -44,12 +47,12 @@ class NN(object):
         self.checkpoint_save = checkpoint_save
         self.initial_lr = initial_lr
         self.model_save = model_save
-        self.dataset = dataset
         self.train_current_batch_data = {}
         self.valid_current_batch_data = {}
         self.param_diagonsitc = param_diagonstic
         self.shape_diagonstic = shape_diagonstic
         self.result_diagonstic = result_diagonstic
+        self.metrics=metrics
         self.optimizer = opt
         self.lr_adjust = lr_adjust
 
@@ -61,6 +64,7 @@ class NN(object):
         global best_val_acc, best_test_acc
 
     def train(self):
+        # if learning_rate_reschedule is a subclass of torch.optim.lr_scheduler, do as usual lr adjust function.
         if self.lr_adjust is not None:
             self.lr_adjust.step()
         best_val_acc = 0
@@ -86,7 +90,7 @@ class NN(object):
                                   'best_val_acc': best_val_acc,
                                   'optimizer': self.optimizer.state_dict(), }, is_best)
 
-    def eval(self):
+    def eval(self, data_loader, model, criterion):
         return None
 
     def train_epoch(self, data_loader, model, criterion, optimizer, print_freq=100):
@@ -100,7 +104,7 @@ class NN(object):
             print_freq(int): number of step to print results. The first round always print.
         """
         losses = AverageMeter()
-        percent_acc = AverageMeter()
+        scores = AverageMeter()
         model.train()
         time_now = time.time()
 
@@ -114,9 +118,9 @@ class NN(object):
 
             losses.update(loss.item(), 1)
 
-            acc = EvaluationMetrics().image_classification_accuracy(pred, target)
+            scores = self.metrics(pred, target)
 
-            percent_acc.update(acc, 1)
+            scores.update(scores, 1)
             optimizer.zero_grad()
             loss.backward(retain_graph=True)
             optimizer.step()
@@ -125,8 +129,8 @@ class NN(object):
             if batch_idx % print_freq == 0:
                 print('Training Round: {}, Time: {}'.format(batch_idx, np.round(time_end, 2)))
                 print('Training Loss: val:{} avg:{} Acc: val:{} avg:{}'.format(losses.val, losses.avg,
-                                                                               percent_acc.val, percent_acc.avg))
-        return losses, percent_acc
+                                                                               scores.val, scores.avg))
+        return losses, scores
 
     def validate_epoch(self, data_loader, model, criterion, print_freq=10000):
         """
@@ -139,7 +143,7 @@ class NN(object):
         """
         model.eval()
         losses = AverageMeter()
-        percent_acc = AverageMeter()
+        scores = AverageMeter()
 
         with torch.no_grad():
             time_now = time.time()
@@ -153,14 +157,14 @@ class NN(object):
 
                 losses.update(loss.item(), data.size(0))
 
-                acc = EvaluationMetrics().image_classification_accuracy(pred, target)
-                percent_acc.update(acc, data.size(0))
+                score = self.metrics(pred, target)
+                scores.update(score, data.size(0))
                 time_end = time.time() - time_now
                 if batch_idx % print_freq == 0:
                     print('Validation Round: {}, Time: {}'.format(batch_idx, np.round(time_end, 2)))
                     print('Validation Loss: val:{} avg:{} Acc: val:{} avg:{}'.format(losses.val, losses.avg,
-                                                                                     percent_acc.val, percent_acc.avg))
-        return losses, percent_acc
+                                                                                     scores.val, scores.avg))
+        return losses, scores
 
     def adjust_learing_rate(self, opt):
         lr = self.initial_lr - 0.0000  # reduce 10 percent every 50 epoch
@@ -182,49 +186,3 @@ class NN(object):
         if is_best:
             model_savefile = os.path.join(self.checkpoint_save, model_filename)
             shutil.copyfile(ckpt_savefile, model_savefile)
-
-class AverageMeter(object):
-    """Computes and stores the average and current value"""
-
-    def __init__(self):
-        self.reset()
-
-    def reset(self):
-        self.val = 0
-        self.avg = 0
-        self.sum = 0
-        self.count = 0
-
-    def update(self, val, n=1):
-        self.val = val
-        self.sum += val * n
-        self.count += n
-        self.avg = self.sum / self.count
-
-class EvaluationMetrics(object):
-    def convert_sklearn_metric_function(self, scoring):
-        if callable(scoring):
-            module = getattr(scoring, '__module__', None)
-            if (
-                    hasattr(module, 'startswith') and
-                    module.startwith('sklearn.metrics.') and
-                    not module.startwith('sklearn.metrics.scorer') and
-                    not module.startwith('sklearn.metrics.tests')
-            ):
-                return make_scorer(scoring)
-        return scoring
-
-    def image_classification_accuracy(self, output, target):
-        """
-        Image classification accuracy calculator.
-        Args:
-            output(Tensor): shape [batch, ], 1 or 0 for every batch sample.
-            target(Tensor): save as output.
-        """
-        output = output.long()
-        target = target.long()
-        with torch.no_grad():
-            total = target.size(0)
-            correct = (output == target).sum().item()
-        percent_acc = 100 * correct / total
-        return percent_acc
