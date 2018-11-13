@@ -1,8 +1,83 @@
-from utils import AverageMeter
 import torch
 import time
 import numpy as np
 import os, shutil
+import torch.nn as nn
+import sklearn
+
+
+class NNprepare(object):
+    """
+    This class contains necessary method to build model.
+    """
+    def __init__(self, save_file_name=None):
+        self.save_file_name = save_file_name
+
+    def _create_save_file_name(self):
+        """
+        The template of name could be as follow.
+        from config import Configuration as cfg
+        if cfg.pretrain_solver == 'sgd':
+            name = 'normal:{}_outlier:{}_{}_{}_m{}_seed{}_bs{}_epochs{}_{}'.format(cfg.pretrain_mnist_normal,
+                                                                                   cfg.pretrain_mnist_outlier,
+                                                                                   cfg.pretrain_solver,
+                                                                                   str(cfg.pretrain_lr),
+                                                                                   str(cfg.pretrain_momentum),
+                                                                                   cfg.seed,
+                                                                                   cfg.pretrain_batch_size,
+                                                                                   cfg.pretrain_epochs,
+                                                                                   self.save_file_name)
+        elif cfg.pretrain_solver == 'adam':
+            name = 'normal:{}_outlier:{}_{}_{}_seed{}_bs{}_epochs{}_{}'.format(cfg.pretrain_mnist_normal,
+                                                                               cfg.pretrain_mnist_outlier,
+                                                                               cfg.pretrain_solver,
+                                                                               str(cfg.pretrain_lr),
+                                                                               cfg.seed,
+                                                                               cfg.pretrain_batch_size,
+                                                                               cfg.pretrain_epochs,
+                                                                               self.save_file_name)
+        return name
+        """
+        raise NotImplementedError
+
+    def _score_function(self, data=None, target=None, criterion=None, model=None):
+        """
+        This function is flexible yet the input and output should follow the exact same procedure.
+
+        The following is a template of score function
+        output = model(data)
+        sq_loss = criterion(output, data)
+        scores = torch.sum(sq_loss, dim=(1, 2, 3))
+        loss = torch.mean(sq_loss)
+
+        return output, scores, loss
+        """
+        raise NotImplementedError
+
+    def _metrics(self, output, target, scores):
+        raise NotImplementedError
+
+    def make_network(self, train_loader=None, val_loader=None,
+                     epochs=None, test_loader=None,
+                     if_checkpoint_save=None,
+                     opt=None, criterion=None, initial_lr=None,
+                     save_path=None, save_file_name=None, dataset=None,
+                     lr_adjust=None, print_result_epoch=None,
+                     target_reshape=None,
+                     print_metric_name=None,
+                     model=None, **kwargs):
+        return NN(train_loader=train_loader, val_loader=val_loader,
+                  epochs=epochs, test_loader=test_loader,
+                  if_checkpoint_save=if_checkpoint_save,
+                  opt=opt, criterion=criterion, initial_lr=initial_lr,
+                  save_path=save_path, save_file_name=save_file_name, dataset=dataset,
+                  lr_adjust=lr_adjust, print_result_epoch=print_result_epoch,
+                  target_reshape=target_reshape,
+                  print_metric_name=print_metric_name,
+                  metrics=self._metrics,
+                  create_save_file_name=self._create_save_file_name,
+                  score_function=self._score_function,
+                  model=model, **kwargs)
 
 
 class NN(object):
@@ -44,11 +119,16 @@ class NN(object):
 
     def __init__(self, model=None, train_loader=None, val_loader=None,
                  test_loader=None, epochs=None,
-                 opt=None, criterion=None, initial_lr=None, checkpoint_save=None,
-                 model_save=None, dataset=None, param_diagonstic=None,
+                 opt=None, criterion=None, initial_lr=None, save_path=None,
+                 save_file_name=None,
+                 dataset=None, param_diagonstic=None,
                  shape_diagonstic=None, if_checkpoint_save=True,
                  result_diagonstic=None, lr_adjust=None, penalty=None,
-                 print_result_epoch=False, metrics=None,
+                 print_result_epoch=False,
+                 print_metric_name=None,
+                 metrics=None,
+                 score_function=None,
+                 create_save_file_name=None,
                  target_reshape=None, **kwargs):
         self.test_loader = test_loader
         self.train_loader = train_loader
@@ -56,9 +136,9 @@ class NN(object):
         self.epochs = epochs
         self.criterion = criterion
         self.model = model
-        self.checkpoint_save = checkpoint_save
+        self.save_path = save_path
+        self.save_file_name = save_file_name
         self.initial_lr = initial_lr
-        self.model_save = model_save
         self.dataset = dataset
         self.train_current_batch_data = {}
         self.valid_current_batch_data = {}
@@ -72,12 +152,29 @@ class NN(object):
         self.penalty = penalty
         self.target_reshape = target_reshape
         self.metrics = metrics
+        self.score_function = score_function
+        self.create_save_file_name = create_save_file_name
+        self.print_metric_name = print_metric_name
+
+        if not os.path.exists(os.path.join(self.save_path, 'train_save')):
+            os.mkdir(os.path.join(self.save_path, 'train_save'))
+        if not os.path.exists(os.path.join(self.save_path, 'test_save')):
+            os.mkdir(os.path.join(self.save_path, 'test_save'))
+        print(self.save_path, self.create_save_file_name())
+        self.train_checkpoint_save = os.path.join(self.save_path, 'train_save', self.create_save_file_name() + '_ckpt.path.tar')
+        self.train_model_save = os.path.join(self.save_path,'train_save', self.create_save_file_name() + '_best.path.tar')
+
+        self.test_checkpoint_save = os.path.join(self.save_path, 'test_save',
+                                                 self.create_save_file_name() + '_ckpt.path.tar')
+        self.test_model_save = os.path.join(self.save_path, 'test_save',
+                                             self.create_save_file_name() + '_best.path.tar')
 
         if not isinstance(self.optimizer, torch.optim.Optimizer):
             raise TypeError('should be an torch.optim.Optimizer type, instead of {}'.format(type(self.optimizer)))
 
         if not isinstance(lr_adjust, torch.optim.lr_scheduler._LRScheduler) and lr_adjust is not None:
             raise TypeError('should be inheritant learning rate scheudler.')
+
         global best_val_acc, best_test_acc
 
     def train(self):
@@ -85,92 +182,129 @@ class NN(object):
         if self.lr_adjust is not None:
             self.lr_adjust.step()
         best_val_acc = 0
+        best_test_acc = 0
+
         for epoch in range(self.epochs):
-            train_losses, train_acc = self.train_epoch(data_loader=self.train_loader,
-                                                       criterion=self.criterion,
-                                                       optimizer=self.optimizer)
-            val_losses, val_acc = self.validate_epoch(data_loader=self.val_loader,
-                                                      criterion=self.criterion)
-            if self.if_checkpoint_save:
+            train_losses, train_acc = self.train_epoch()
+            val_losses, val_acc = self.validate_epoch()
+            if self.if_checkpoint_save and self.test_loader is None:
                 is_best = val_acc.avg > best_val_acc
                 print('>>>>>>>>>>>>>>>>>>>>>>')
                 print(
-                    'Epoch: {} train loss: {}, train acc: {}, valid loss: {}, valid acc: {}'.format(epoch, train_losses.avg,
-                                                                                                    train_acc.avg,
-                                                                                                    val_losses.avg,
-                                                                                                    val_acc.avg))
+                    'Epoch: {} train loss: {}, train {}: {}, valid loss: {}, valid {}: {}'.format(epoch, train_losses.avg,
+                                                                                                  train_acc.avg,
+                                                                                                  self.print_metric_name,
+                                                                                                  val_losses.avg,
+                                                                                                  self.print_metric_name,
+                                                                                                  val_acc.avg))
                 print('>>>>>>>>>>>>>>>>>>>>>>')
                 self.save_checkpoint({'epoch': epoch + 1,
                                       'state_dict': self.model.state_dict(),
                                       'best_val_acc': best_val_acc,
-                                      'optimizer': self.optimizer.state_dict(), }, is_best)
+                                      'optimizer': self.optimizer.state_dict(), }, is_best,
+                                     self.train_checkpoint_save, self.train_model_save)
+
+            elif self.if_checkpoint_save and self.test_loader is not None:
+                is_best = val_acc.avg > best_val_acc
+                print('>>>>>>>>>>>>>>>>>>>>>>')
+                print(
+                    'Epoch: {} train loss: {}, train {}: {}, valid loss: {}, valid {}: {}'.format(epoch,
+                                                                                                  train_losses.avg,
+                                                                                                  train_acc.avg,
+                                                                                                  self.print_metric_name,
+                                                                                                  val_losses.avg,
+                                                                                                  self.print_metric_name,
+                                                                                                  val_acc.avg))
+                print('>>>>>>>>>>>>>>>>>>>>>>')
+                self.save_checkpoint({'epoch': epoch + 1,
+                                      'state_dict': self.model.state_dict(),
+                                      'best_val_acc': best_val_acc,
+                                      'optimizer': self.optimizer.state_dict(), }, is_best,
+                                     self.train_checkpoint_save, self.train_model_save)
+
+                test_acc = self.evaluate()
+                is_best_test = test_acc.avg > best_test_acc
+                self.save_checkpoint({'epoch': epoch + 1,
+                                      'state_dict': self.model.state_dict(),
+                                      'best_test_acc': best_test_acc,
+                                      'optimizer': self.optimizer.state_dict(), }, is_best_test,
+                                     self.test_checkpoint_save, self.test_model_save)
+
         print('Training process end.')
 
-    def train_epoch(self, data_loader, criterion,
-                    optimizer, print_freq=100):
+    def train_epoch(self, print_freq=100):
         """
         Train function for every epoch. Standard for supervised learning.
         Args:
-            data_loader (torch.utils.dataset.Dataloader): Dataloader for training.
-            model :
-            criterion (torch.nn.Module): Loss function.
-            optimizer (torch.opt) : Optimizer.
             print_freq(int): number of step to print results. The first round always print.
         """
-        losses = AverageMeter()
-        percent_acc = AverageMeter()
+        losses = self.AverageMeter()
+        percent_acc = self.AverageMeter()
         self.model.train()
         time_now = time.time()
 
-        for batch_idx, (data, target) in enumerate(data_loader):
+        for batch_idx, (data, target) in enumerate(self.train_loader):
             target = target.float()
+
             if self.target_reshape is not None:
                 target = self.target_reshape(target)
             if torch.cuda.is_available():
                 data = data.cuda()
                 target = target.cuda()
 
-            output = self.model(data)
-            loss = criterion(output, target)
+            if self.score_function is None:
+                output = self.model(data)
+                loss = self.criterion(output, target)
+            else:
+                output, scores, loss = self.score_function(data, target, self.criterion, self.model)
+
             if self.penalty is not None:
                 penalty_val = self.loss_penalty()
                 loss += penalty_val
 
-            losses.update(loss.item(), 1)
+            losses.update(loss.item(), data.size(0))
 
-            acc = self.metrics(output, target)
+            if torch.cuda.is_available():
+                target = target.to(torch.device("cpu"))
+                output = output.to(torch.device("cpu"))
+                if self.score_function is not None:
+                    scores = scores.to(torch.device("cpu"))
 
-            percent_acc.update(acc, 1)
-            optimizer.zero_grad()
+            if self.score_function is None:
+                acc = self.metrics(output, target)
+            else:
+                acc = self.metrics(output, target, scores)
+
+
+            percent_acc.update(acc, data.size(0))
+
+            self.optimizer.zero_grad()
             loss.backward()
-            optimizer.step()
+            self.optimizer.step()
 
             time_end = time.time() - time_now
             if batch_idx % print_freq == 0 and self.print_result_epoch:
                 print('Training Round: {}, Time: {}'.format(batch_idx,
                                                             np.round(time_end, 2)))
-                print('Training Loss: val:{} avg:{} Acc: val:{} avg:{}'.format(losses.val,
-                                                                               losses.avg,
-                                                                               percent_acc.val, percent_acc.avg))
+                print('Training Loss: val:{} avg:{} {}: val:{} avg:{}'.format(losses.val,
+                                                                              losses.avg,
+                                                                              self.print_metric_name,
+                                                                              percent_acc.val, percent_acc.avg))
         return losses, percent_acc
 
-    def validate_epoch(self, data_loader, criterion,
-                       print_freq=10000):
+    def validate_epoch(self, print_freq=10000):
         """
         Validation function for every epoch.
         Args:
-            data_loader (torch.utils.dataset.Dataloader): Dataloader for training.
-            model :
-            criterion (torch.nn.Module): Loss function.
             print_freq(int): number of step to print results. The first round always print.
         """
         self.model.eval()
-        losses = AverageMeter()
-        percent_acc = AverageMeter()
+        losses = self.AverageMeter()
+        percent_acc = self.AverageMeter()
 
         with torch.no_grad():
             time_now = time.time()
-            for batch_idx, (data, target) in enumerate(data_loader):
+            for batch_idx, (data, target) in enumerate(self.val_loader):
                 if self.target_reshape is not None:
                     target = self.target_reshape(target)
                 target = target.float()
@@ -178,21 +312,34 @@ class NN(object):
                     data = data.cuda()
                     target = target.cuda()
 
-                output = self.model(data)
-                # implement loss
-                loss = criterion(output, target)
+                if self.score_function is None:
+                    output = self.model(data)
+                    loss = self.criterion(output, target)
+                else:
+                    output, scores, loss = self.score_function(data, target, self.criterion, self.model)
+
                 if self.penalty is not None:
                     penalty_val = self.loss_penalty()
                     loss += penalty_val
 
                 losses.update(loss.item(), data.size(0))
 
-                acc = self.metrics(output, target)
+                if torch.cuda.is_available():
+                    target = target.to(torch.device("cpu"))
+                    output = output.to(torch.device("cpu"))
+                    if self.score_function is not None:
+                        scores = scores.to(torch.device("cpu"))
+
+                if self.score_function is None:
+                    acc = self.metrics(output, target)
+                else:
+                    acc = self.metrics(output, target, scores)
+
                 percent_acc.update(acc, data.size(0))
                 time_end = time.time() - time_now
                 if batch_idx % print_freq == 0 and self.print_result_epoch:
                     print('Validation Round: {}, Time: {}'.format(batch_idx, np.round(time_end, 2)))
-                    print('Validation Loss: val:{} avg:{} Acc: val:{} avg:{}'.format(losses.val, losses.avg,
+                    print('Validation Loss: val:{} avg:{} {}: val:{} avg:{}'.format(losses.val, losses.avg, self.print_metric_name,
                                                                                      percent_acc.val, percent_acc.avg))
         return losses, percent_acc
 
@@ -201,7 +348,7 @@ class NN(object):
         for param_group in opt.param_groups:
             param_group['lr'] = lr
 
-    def save_checkpoint(self, state, is_best):
+    def save_checkpoint(self, state, is_best_test, checkpoint_save, model_save):
         """
         save the best states.
         :param state:
@@ -210,9 +357,9 @@ class NN(object):
         """
         #if not os.path.exists(self.checkpoint_save):
         #    os.mkdir(self.checkpoint_save)
-        torch.save(state, self.checkpoint_save)
-        if is_best:
-            shutil.copyfile(self.checkpoint_save, self.model_save)
+        torch.save(state, checkpoint_save)
+        if is_best_test:
+            shutil.copyfile(checkpoint_save, model_save)
 
     def save_model(self):
         return None
@@ -230,8 +377,7 @@ class NN(object):
             print('=> loaded checkpoint {} of epoch {}'.format(resume_file_path,
                 checkpoint['epoch']))
 
-    def evaluate(self, weights,
-                       print_freq=10000):
+    def evaluate(self, weights=None, print_freq=10000):
         """
         Validation function for every epoch.
         Args:
@@ -244,7 +390,7 @@ class NN(object):
             self.resume_model(weights)
             print('Weights loaded.')
         self.model.eval()
-        percent_acc = AverageMeter()
+        percent_acc = self.AverageMeter()
 
         with torch.no_grad():
             time_now = time.time()
@@ -253,21 +399,58 @@ class NN(object):
                     data = data.cuda()
                     target = target.cuda()
 
-                output = self.model(data)
+                if self.score_function is None:
+                    output = self.model(data)
+                else:
+                    output, scores, loss = self.score_function(data, target, self.criterion, self.model)
 
-                acc = self.metrics(output, target)
+                if torch.cuda.is_available():
+                    target = target.to(torch.device("cpu"))
+                    output = output.to(torch.device("cpu"))
+                    if self.score_function is not None:
+                        scores = scores.to(torch.device("cpu"))
+
+                if self.score_function is None:
+                    acc = self.metrics(output, target)
+                else:
+                    acc = self.metrics(output, target, scores)
+
                 percent_acc.update(acc, data.size(0))
                 time_end = time.time() - time_now
-        print('Test AUC: val:{} avg:{}'.format(percent_acc.val, percent_acc.avg))
+        print('Test {}: val:{} avg:{}'.format(self.print_metric_name, percent_acc.val, percent_acc.avg))
         if not weights:
             print('Test evaluation is end!')
-        print('Test evaluation is end!')
+        return percent_acc
 
     def loss_penalty(self):
+        l1_crit = nn.L1Loss(size_average=False)
         if self.penalty['type'] == 'l2':
             l2_penalty = 0
+
             for param in self.model.parameters():
-                l2_penalty = (0.5 / self.penalty['reg']) * l2_penalty
+                l2_penalty = torch.norm(param, 2) + l2_penalty
+            l2_penalty = l2_penalty * (0.5 / self.penalty['reg'])
             return l2_penalty
         else:
             raise ValueError('Currently only l2 penalty are supported')
+
+    class AverageMeter(object):
+        """Computes and stores the average and current value"""
+
+        def __init__(self):
+            self.reset()
+
+        def reset(self):
+            self.val = 0
+            self.avg = 0
+            self.sum = 0
+            self.count = 0
+
+        def update(self, val, n=1):
+            self.val = val
+            self.sum += val * n
+            self.count += n
+            self.avg = self.sum / self.count
+
+
+
