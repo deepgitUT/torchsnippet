@@ -1,4 +1,5 @@
 import numpy as np
+from sklearn.decomposition import MiniBatchDictionaryLearning, PCA
 
 
 def normalize_data(train_set,
@@ -27,7 +28,7 @@ def normalize_data(train_set,
     return train_set
 
 
-def global_contrast_normalization(dataset, scale="std"):
+def global_contrast_normalization(X_train, X_val, X_test, scale="std"):
     """
     Subtract mean across features (pixels) and normalize by scale, which is
     either the standard deviation, l1- or l2-norm across features (pixel).
@@ -38,25 +39,44 @@ def global_contrast_normalization(dataset, scale="std"):
 
     na = np.newaxis
 
-    dataset_mean = np.mean(dataset, axis=(1, 2, 3),
+    X_train_mean = np.mean(X_train, axis=(1, 2, 3),
                            dtype=np.float32)[:, na, na, na]
+    X_val_mean = np.mean(X_val, axis=(1, 2, 3),
+                         dtype=np.float32)[:, na, na, na]
+    X_test_mean = np.mean(X_test, axis=(1, 2, 3),
+                          dtype=np.float32)[:, na, na, na]
 
-    dataset -= dataset_mean
+    X_train -= X_train_mean
+    X_val -= X_val_mean
+    X_test -= X_test_mean
 
     if scale == "std":
-        dataset_scale = np.std(dataset, axis=(1, 2, 3),
+        X_train_scale = np.std(X_train, axis=(1, 2, 3),
                                dtype=np.float32)[:, na, na, na]
-
+        X_val_scale = np.std(X_val, axis=(1, 2, 3),
+                             dtype=np.float32)[:, na, na, na]
+        X_test_scale = np.std(X_test, axis=(1, 2, 3),
+                              dtype=np.float32)[:, na, na, na]
     if scale == "l1":
-        dataset_scale = np.sum(np.absolute(dataset), axis=(1, 2, 3),
+        X_train_scale = np.sum(np.absolute(X_train), axis=(1, 2, 3),
                                dtype=np.float32)[:, na, na, na]
-
+        X_val_scale = np.sum(np.absolute(X_val), axis=(1, 2, 3),
+                             dtype=np.float32)[:, na, na, na]
+        X_test_scale = np.sum(np.absolute(X_test), axis=(1, 2, 3),
+                              dtype=np.float32)[:, na, na, na]
     if scale == "l2":
         # equivalent to "std" since mean is subtracted beforehand
-        dataset_scale = np.sqrt(np.sum(dataset ** 2, axis=(1, 2, 3),
+        X_train_scale = np.sqrt(np.sum(X_train ** 2, axis=(1, 2, 3),
                                        dtype=np.float32))[:, na, na, na]
+        X_val_scale = np.sqrt(np.sum(X_val ** 2, axis=(1, 2, 3),
+                                     dtype=np.float32))[:, na, na, na]
+        X_test_scale = np.sqrt(np.sum(X_test ** 2, axis=(1, 2, 3),
+                                      dtype=np.float32))[:, na, na, na]
 
-    dataset /= dataset_scale
+    X_train /= X_train_scale
+    X_val /= X_val_scale
+    X_test /= X_test_scale
+    return X_train, X_val, X_test
 
 
 def zca_whitening(X_train, X_val, X_test, eps=0.1):
@@ -100,3 +120,32 @@ def zca_whitening(X_train, X_val, X_test, eps=0.1):
     X_test = X_test.reshape(shape_test)
 
     return X_train, X_val, X_test
+
+
+def pca(X_train, X_val, X_test, var_retained=0.95):
+    """
+    PCA such that var_retained of variance is retained (w.r.t. train set)
+    """
+
+    print("Applying PCA...")
+
+    # reshape to 2D if input is tensor
+    if X_train.ndim > 2:
+        X_train = X_train.reshape(X_train.shape[0], -1)
+        if X_val.size > 0:
+            X_val = X_val.reshape(X_val.shape[0], -1)
+        if X_test.size > 0:
+            X_test = X_test.reshape(X_test.shape[0], -1)
+
+    pca = PCA(n_components=var_retained)
+    pca.fit(X_train)
+    X_train = pca.transform(X_train)
+    if X_val.size > 0:
+        X_val = pca.transform(X_val)
+    if X_test.size > 0:
+        X_test = pca.transform(X_test)
+
+    print("PCA pre-processing finished.")
+
+    return X_train, X_val, X_test
+
